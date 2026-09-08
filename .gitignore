@@ -1,0 +1,10 @@
+.env
+node_modules/
+.next/
+__pycache__/
+*.pyc
+.venv/
+*.env
+multimodal-docs/
+.claude/settings.local.json
+.pytest_cache/
