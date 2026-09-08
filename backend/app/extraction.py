@@ -4,6 +4,7 @@ import uuid
 from app.db import get_connection
 from app.parsing import PersistedParse, get_or_create_parse
 from app.scope_gate import ScopeDecision, classify_invoice
+from app.status import transition
 
 logger = logging.getLogger(__name__)
 
@@ -14,16 +15,10 @@ async def extract_fields(document_id: str, parse: PersistedParse) -> None:
 
 
 async def mark_rejected_out_of_scope(document_id: str) -> None:
-    # Only from a not-yet-finished state: a document whose extraction already
-    # completed or failed must never be silently relabelled by a late re-run.
+    # Legal only from pending/processing (see app.status): a document whose
+    # extraction already completed or failed is never silently relabelled.
     async with get_connection() as conn:
-        await conn.execute(
-            """
-            UPDATE documents SET extraction_status = 'rejected_out_of_scope'
-            WHERE id = $1 AND extraction_status IN ('pending', 'processing')
-            """,
-            uuid.UUID(document_id),
-        )
+        await transition(conn, uuid.UUID(document_id), "extraction", "rejected_out_of_scope")
 
 
 async def run_extraction(document_id: str) -> ScopeDecision:
