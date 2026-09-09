@@ -16,3 +16,4 @@ pypdf
 opencv-python-headless
 numpy
 Pillow
+google-genai==2.28.0

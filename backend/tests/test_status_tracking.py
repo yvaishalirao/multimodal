@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.status import InvalidStatusTransition, transition
+from app.status import InvalidStatusTransition, completing_write, transition
 
 
 @pytest.fixture
@@ -20,6 +20,7 @@ async def conn_and_doc():
     try:
         yield conn, document_id
     finally:
+        await conn.execute("DELETE FROM chunks WHERE document_id = $1", document_id)
         await conn.execute("DELETE FROM documents WHERE id = $1", document_id)
         await conn.close()
 
@@ -89,6 +90,60 @@ async def test_failed_can_be_retried(conn_and_doc):
         await transition(conn, document_id, "extraction", step)
 
     assert await _statuses(conn, document_id) == ("complete", "pending")
+
+
+ZERO_VECTOR = "[" + ",".join(["0"] * 1024) + "]"
+
+
+async def _insert_chunk(conn, document_id) -> None:
+    await conn.execute(
+        """
+        INSERT INTO chunks (document_id, chunk_type, text_content, embedding)
+        VALUES ($1, 'text', 'chunk', $2::vector)
+        """,
+        document_id,
+        ZERO_VECTOR,
+    )
+
+
+async def test_status_never_leads_writes(conn_and_doc):
+    conn, document_id = conn_and_doc
+    await transition(conn, document_id, "rag", "processing")
+
+    # Failure after the last chunk insert, before commit -- exactly where a
+    # naive implementation would already have set rag_status='complete'.
+    with pytest.raises(RuntimeError):
+        async with completing_write(document_id, "rag") as write_conn:
+            await _insert_chunk(write_conn, document_id)
+            await _insert_chunk(write_conn, document_id)
+            raise RuntimeError("injected after inserts, before commit")
+
+    # Both halves rolled back together: no chunks AND status not complete.
+    assert await conn.fetchval("SELECT count(*) FROM chunks WHERE document_id = $1", document_id) == 0
+    assert (await _statuses(conn, document_id))[1] == "processing"
+
+
+async def test_illegal_completion_rolls_back_writes(conn_and_doc):
+    conn, document_id = conn_and_doc
+    # Still 'pending': completing is illegal, so the writes must not land
+    # either -- a status failure can't leave orphaned chunks behind.
+    with pytest.raises(InvalidStatusTransition):
+        async with completing_write(document_id, "rag") as write_conn:
+            await _insert_chunk(write_conn, document_id)
+
+    assert await conn.fetchval("SELECT count(*) FROM chunks WHERE document_id = $1", document_id) == 0
+    assert await _statuses(conn, document_id) == ("pending", "pending")
+
+
+async def test_completing_write_commits_writes_and_status_together(conn_and_doc):
+    conn, document_id = conn_and_doc
+    await transition(conn, document_id, "rag", "processing")
+
+    async with completing_write(document_id, "rag") as write_conn:
+        await _insert_chunk(write_conn, document_id)
+
+    assert await conn.fetchval("SELECT count(*) FROM chunks WHERE document_id = $1", document_id) == 1
+    assert (await _statuses(conn, document_id))[1] == "complete"
 
 
 async def test_no_stored_overall_status_column():

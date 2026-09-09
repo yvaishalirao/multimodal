@@ -3,11 +3,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.documents import router as documents_router
+from app.llm_provider import validate_llm_config
 from app.storage import ensure_bucket
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail startup on a non-free-tier model rather than on the first call.
+    validate_llm_config()
     ensure_bucket()
     yield
 

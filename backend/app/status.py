@@ -10,9 +10,12 @@ so a status change can be committed in the same transaction as the writes it
 claims to represent (S2-T3).
 """
 import uuid
-from typing import Literal
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Literal
 
 import asyncpg
+
+from app.db import get_connection
 
 Pipeline = Literal["extraction", "rag"]
 
@@ -77,3 +80,25 @@ async def transition(
         raise InvalidStatusTransition(
             f"{pipeline}: illegal transition '{current}' -> '{to_status}'"
         )
+
+
+@asynccontextmanager
+async def completing_write(
+    document_id: uuid.UUID, pipeline: Pipeline
+) -> AsyncIterator[asyncpg.Connection]:
+    """The only way a pipeline should reach 'complete' (S2-T3, INV-12).
+
+        async with completing_write(doc_id, "rag") as conn:
+            ...insert chunks on conn...
+
+    The body's writes and the status change to 'complete' commit in one
+    transaction: if the body raises, or the transition itself is illegal,
+    everything rolls back together -- status can never claim writes that
+    didn't land, and writes never land without the status saying so. There
+    is deliberately no finally-block status update here: on failure, the
+    orchestrator's error boundary is what records 'failed'.
+    """
+    async with get_connection() as conn:
+        async with conn.transaction():
+            yield conn
+            await transition(conn, document_id, pipeline, "complete")

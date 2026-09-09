@@ -8,7 +8,7 @@ import pytest
 
 from app.db import get_connection
 from app.orchestrator import process_document
-from app.status import transition
+from app.status import completing_write
 
 ZERO_VECTOR = "[" + ",".join(["0"] * 1024) + "]"
 
@@ -65,12 +65,10 @@ def _fake_rag(*, fail: bool, committed: asyncio.Event | None = None, wait_for=No
         if wait_for is not None:
             await wait_for.wait()
         doc = uuid.UUID(document_id)
-        async with get_connection() as conn:
-            async with conn.transaction():
-                await _insert_chunks(conn, doc, 2)
-                if fail:
-                    raise InjectedFailure("rag chunking blew up")
-                await transition(conn, doc, "rag", "complete")
+        async with completing_write(doc, "rag") as conn:
+            await _insert_chunks(conn, doc, 2)
+            if fail:
+                raise InjectedFailure("rag chunking blew up")
         if committed is not None:
             committed.set()
 
@@ -82,12 +80,10 @@ def _fake_extraction(*, fail: bool, committed: asyncio.Event | None = None, wait
         if wait_for is not None:
             await wait_for.wait()
         doc = uuid.UUID(document_id)
-        async with get_connection() as conn:
-            async with conn.transaction():
-                await _insert_extraction_rows(conn, doc, 3)
-                if fail:
-                    raise InjectedFailure("LLM call blew up mid-extraction")
-                await transition(conn, doc, "extraction", "complete")
+        async with completing_write(doc, "extraction") as conn:
+            await _insert_extraction_rows(conn, doc, 3)
+            if fail:
+                raise InjectedFailure("LLM call blew up mid-extraction")
         if committed is not None:
             committed.set()
 
