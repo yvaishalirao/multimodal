@@ -96,6 +96,10 @@ async def test_single_shared_parse_output():
         )
         assert "Widget" not in text_blob
         assert "9.99" not in text_blob
+
+        # Docling's confidence is carried through for the scorer (S3-T5).
+        assert first.result.confidence is not None
+        assert 0.0 <= first.result.confidence <= 1.0
     finally:
         await conn.execute("DELETE FROM parses WHERE document_id = $1", document_id)
         await conn.execute("DELETE FROM documents WHERE id = $1", document_id)

@@ -1,5 +1,6 @@
 import io
 import json
+import math
 import uuid
 from io import BytesIO
 from typing import Literal
@@ -39,6 +40,18 @@ class ParsedBlock(BaseModel):
 
 class ParseResult(BaseModel):
     blocks: list[ParsedBlock]
+    # Docling's mean layout/OCR/parse confidence, 0..1. None when Docling
+    # didn't produce one (or for parses stored before this field existed) --
+    # the confidence scorer treats that as a missing signal, not as 0 or 1.
+    confidence: float | None = None
+
+
+def _docling_confidence(result) -> float | None:
+    try:
+        score = float(result.confidence.mean_score)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) else None
 
 
 class PersistedParse(BaseModel):
@@ -78,7 +91,7 @@ def run_docling_conversion(pdf_bytes: bytes) -> ParseResult:
         block_type = "heading" if label in HEADING_LABELS else "text"
         blocks.append(ParsedBlock(order=order, page=page, block_type=block_type, text=text))
 
-    return ParseResult(blocks=blocks)
+    return ParseResult(blocks=blocks, confidence=_docling_confidence(result))
 
 
 async def _fetch_parse_row(conn: asyncpg.Connection, document_id: str):
