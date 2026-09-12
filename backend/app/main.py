@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.documents import router as documents_router
 from app.llm_provider import validate_llm_config
+from app.review import router as review_router
 from app.storage import ensure_bucket
 
 
@@ -17,6 +18,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Document RAG + Extraction Pipeline", lifespan=lifespan)
 app.include_router(documents_router)
+app.include_router(review_router)
 
 
 @app.get("/health")
