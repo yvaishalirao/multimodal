@@ -1,12 +1,18 @@
 import json
 import uuid
+from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from app.db import get_connection
-from app.review_queue import claim_next
+from app.review_queue import (
+    QueueItemAlreadyResolved,
+    QueueItemNotFound,
+    claim_next,
+    submit_correction,
+)
 
 router = APIRouter(prefix="/review", tags=["review"])
 
@@ -46,4 +52,41 @@ async def claim(document_id: uuid.UUID | None = None):
         confidence_degraded=row["confidence_degraded"],
         source_file=row["source_file"],
         content_type=json.loads(row["upload_metadata"]).get("content_type", ""),
+    )
+
+
+class CorrectionRequest(BaseModel):
+    corrected_value: Any
+    reviewer: str | None = None
+
+
+class CorrectionResponse(BaseModel):
+    correction_id: str
+    queue_id: str
+    queue_status: str
+    extraction_result_id: str
+    original_value: Any
+    corrected_value: Any
+    reviewer: str
+    corrected_at: datetime
+
+
+@router.post("/{queue_id}/correct", response_model=CorrectionResponse)
+async def correct(queue_id: uuid.UUID, body: CorrectionRequest) -> CorrectionResponse:
+    async with get_connection() as conn:
+        try:
+            row = await submit_correction(conn, queue_id, body.corrected_value, body.reviewer)
+        except QueueItemNotFound:
+            raise HTTPException(status_code=404, detail="Review item not found.")
+        except QueueItemAlreadyResolved:
+            raise HTTPException(status_code=409, detail="Review item is already resolved.")
+    return CorrectionResponse(
+        correction_id=str(row["id"]),
+        queue_id=str(queue_id),
+        queue_status="resolved",
+        extraction_result_id=str(row["extraction_result_id"]),
+        original_value=json.loads(row["original_value"]),
+        corrected_value=json.loads(row["corrected_value"]),
+        reviewer=row["reviewer"],
+        corrected_at=row["corrected_at"],
     )

@@ -9,7 +9,9 @@ A field is queued at most once while unresolved. Two layers:
   also the backstop: if that index were ever dropped, Postgres rejects the
   ON CONFLICT clause outright instead of quietly allowing duplicates.
 """
+import json
 import uuid
+from typing import Any
 
 import asyncpg
 
@@ -75,3 +77,65 @@ async def claim_next(
             """,
             claimed["id"],
         )
+
+
+DEFAULT_REVIEWER = "local-reviewer"
+
+
+class QueueItemNotFound(Exception):
+    pass
+
+
+class QueueItemAlreadyResolved(Exception):
+    pass
+
+
+async def _resolve_queue_item(conn: asyncpg.Connection, queue_id: uuid.UUID) -> None:
+    await conn.execute(
+        "UPDATE review_queue SET status = 'resolved', resolved_at = now() WHERE id = $1",
+        queue_id,
+    )
+
+
+async def submit_correction(
+    conn: asyncpg.Connection,
+    queue_id: uuid.UUID,
+    corrected_value: Any,
+    reviewer: str | None,
+) -> asyncpg.Record:
+    """Record a reviewer's value for a queued field (S4-T2).
+
+    Append-only: a new correction_history row, never an UPDATE to
+    extraction_results (INV-2; the DB trigger would reject one anyway). The
+    reviewer is never NULL (INV-8) -- with no auth, an absent or blank name
+    falls back to a fixed local identifier. The correction and the queue
+    item's move to 'resolved' share one transaction (INV-5), and the queue
+    row is locked first so two concurrent corrections can't both land.
+    """
+    reviewer = (reviewer or "").strip() or DEFAULT_REVIEWER
+    async with conn.transaction():
+        status = await conn.fetchval(
+            "SELECT status FROM review_queue WHERE id = $1 FOR UPDATE", queue_id
+        )
+        if status is None:
+            raise QueueItemNotFound(str(queue_id))
+        if status == "resolved":
+            raise QueueItemAlreadyResolved(str(queue_id))
+
+        correction = await conn.fetchrow(
+            """
+            INSERT INTO correction_history
+                (extraction_result_id, original_value, corrected_value, reviewer)
+            SELECT er.id, COALESCE(er.extracted_value, 'null'::jsonb), $2::jsonb, $3
+            FROM review_queue q
+            JOIN extraction_results er ON er.id = q.extraction_result_id
+            WHERE q.id = $1
+            RETURNING id, extraction_result_id, original_value, corrected_value,
+                      reviewer, corrected_at
+            """,
+            queue_id,
+            json.dumps(corrected_value),
+            reviewer,
+        )
+        await _resolve_queue_item(conn, queue_id)
+    return correction
