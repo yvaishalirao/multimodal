@@ -11,6 +11,7 @@ from app.db import get_connection
 from app.field_extraction import call_extraction, page_images_as_png
 from app.llm_provider import get_llm_provider
 from app.parsing import PersistedParse, get_or_create_parse
+from app.review_queue import route_to_review
 from app.scope_gate import ScopeDecision, classify_invoice
 from app.status import completing_write, transition
 from app.storage import get_bucket_name, get_minio_client
@@ -64,13 +65,17 @@ async def write_extraction_results(
     validations: dict[str, FieldValidation],
     confidences: dict[str, FieldConfidence],
 ) -> dict[str, uuid.UUID]:
-    """Every field row and the extraction_status -> 'complete' transition
-    commit in one transaction (S3-T6, INV-1, INV-12): a failure partway
-    through leaves zero rows for the document, never a partial set."""
+    """Every field row, its review-queue entry if it needs one (S3-T7), and
+    the extraction_status -> 'complete' transition commit in one transaction
+    (S3-T6, INV-1, INV-12): a failure partway through leaves zero rows for
+    the document, never a partial set -- and no field can be complete
+    without its review entry, or queued without its row."""
     ids: dict[str, uuid.UUID] = {}
     async with completing_write(document_id, "extraction") as conn:
         for name, validation in validations.items():
             ids[name] = await _insert_field_row(conn, document_id, validation, confidences[name])
+            if confidences[name].needs_review:
+                await route_to_review(conn, ids[name])
     return ids
 
 
